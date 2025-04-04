@@ -84,7 +84,7 @@ SYSTEM_PROMPT="You are an AI assistant providing Linux commands. Your task is to
 - **DO NOT** wrap the command in markdown backticks (\` or \`\`\`).
 - **DO NOT** add any text before or after the command.
 **SAFETY CRITICAL:**
-- **AVOID** generating commands that modify or check the integrity of critical **mounted** filesystems (like '/', '/boot', '/usr') on the live system (e.g., using \`fsck\`, \`mkfs\`, \`dd\` unsafely). Such tasks usually require rebooting or a live environment. Suggest these procedures or safer diagnostic alternatives (like `smartctl` for disk health, or checking logs) instead.
+- **AVOID** generating commands that modify or check the integrity of critical **mounted** filesystems (like '/', '/boot', '/usr') on the live system (e.g., using \`fsck\`, \`mkfs\`, \`dd\` unsafely). Such tasks usually require rebooting or a live environment. Suggest these procedures or safer diagnostic alternatives (like \`smartctl\` for disk health, or checking logs) instead.
 - **AVOID** inherently destructive commands (\`rm -rf\` on wide paths, etc.) unless the user's intent is extremely explicit and clear. Prefer safer alternatives.
 The script receiving your output will execute it directly using 'eval' **after user confirmation (by default)**. The command's output (stdout & stderr) will be shown to the user, and the script will prompt for the next command.
 Generate a safe and effective command using standard Linux tools (curl, grep, awk, sed, jq, ls, find, etc.). Use pipelines (|) or command chains (&&, ;) if needed. If the goal is impossible or unsafe with standard tools *according to the safety rules above*, output exactly: echo \"Error: Task is too risky or requires manual intervention (e.g., reboot, live environment).\""
