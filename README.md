@@ -106,10 +106,4 @@ Before running `agent`, ensure you have the following:
 * **API Key:** Set via the `OPENAI_API_KEY` environment variable (required).
 * **AI Model:** The OpenAI model used can be changed by modifying the `MODEL` variable near the top of the `agent` script file (default: `gpt-4-turbo-preview`). Ensure the chosen model is compatible with the Chat Completions API endpoint.
 
-## License
-
-[Choose a License, e.g., MIT]
-
-This project is licensed under the MIT License - see the LICENSE file for details (or add license text here).
-
 **Disclaimer:** This script is provided "as-is" without warranty of any kind. Use responsibly and understand the risks.
