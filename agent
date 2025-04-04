@@ -1,0 +1,202 @@
+#!/bin/bash
+
+# === Configuration ===
+LOG_FILE="agent_shell_$(date +%Y%m%d_%H%M%S).log"
+OPENAI_API_ENDPOINT="https://api.openai.com/v1/chat/completions"
+MODEL="gpt-4-turbo-preview" # Or your preferred model
+TEMPERATURE=0.2
+MAX_TOKENS=250
+AGENT_PROMPT="agent: "
+DEBUG_MODE=0 # Default: Quiet mode (0=off, 1=on)
+
+# === Logging Function (Conditional) ===
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AgentShell] $@" >> "$LOG_FILE"
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [AgentShell] $@" >&2
+    fi
+}
+
+# === Command-Line Argument Parsing ===
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -v|--verbose|--debug=on) # Grouped enable flags
+            DEBUG_MODE=1
+            shift
+            ;;
+        --debug=off)
+            DEBUG_MODE=0
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $0 [-v|--verbose|--debug=on|--debug=off]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# === Initial Setup ===
+log "Initializing Agent Shell... (Debug Mode: $DEBUG_MODE)"
+log "Checking for OPENAI_API_KEY..."
+if [ -z "$OPENAI_API_KEY" ]; then
+  log "FATAL: OPENAI_API_KEY environment variable is not set."
+  echo "[FATAL Error] OPENAI_API_KEY is not set. Please set it before running the script." >&2
+  exit 1
+fi
+log "OPENAI_API_KEY found."
+
+if ! command -v curl &> /dev/null || ! command -v jq &> /dev/null; then
+    log "FATAL: 'curl' or 'jq' command not found. Please install them."
+    echo "[FATAL Error] 'curl' and 'jq' are required but not installed." >&2
+    exit 1
+fi
+log "Dependencies (curl, jq) found."
+
+# === System Prompt ===
+SYSTEM_PROMPT="You are an AI assistant providing Linux commands. Your task is to generate the **exact, single-line Linux bash command (or pipeline)** required to achieve the user's goal within a standard Linux terminal.
+**CRITICAL:** You MUST output ONLY the raw command string itself.
+- **DO NOT** include any explanations, comments, introductory text (like 'Here is the command:'), or concluding remarks.
+- **DO NOT** wrap the command in markdown backticks (\` or \`\`\`).
+- **DO NOT** add any text before or after the command.
+The script receiving your output will execute it directly using 'eval'. The command's output (stdout & stderr) will be shown to the user, and the script will prompt for the next command.
+Generate a safe and effective command using standard Linux tools (curl, grep, awk, sed, jq, ls, find, etc.). Use pipelines (|) or command chains (&&, ;) if needed. If the goal is impossible or unsafe with standard tools, output exactly: echo \"Error: Goal is too complex or requires tools not typically available.\""
+
+
+# === Main Interactive Loop ===
+log "Starting interactive session."
+echo "Welcome to Agent Shell. Type your goal, or 'exit'/'quit' (or press Ctrl+D) to leave."
+if [ "$DEBUG_MODE" -eq 1 ]; then
+    echo "[Agent Info] Running in verbose/debug mode." >&2
+fi
+
+while true; do
+    read -e -p "$AGENT_PROMPT" USER_GOAL
+    read_status=$?
+    if [ $read_status -ne 0 ]; then
+        echo
+        log "EOF detected (Ctrl+D). Exiting."
+        break
+    fi
+
+    USER_GOAL_TRIMMED=$(echo "$USER_GOAL" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+    # --- Handle Internal Commands FIRST ---
+    if [[ "$USER_GOAL_TRIMMED" == "exit" || "$USER_GOAL_TRIMMED" == "quit" ]]; then
+        log "Exit command received ('$USER_GOAL_TRIMMED'). Exiting."
+        break
+    elif [[ "$USER_GOAL_TRIMMED" == "set debug=on" ]]; then
+        if [ "$DEBUG_MODE" -ne 1 ]; then DEBUG_MODE=1; echo "[Agent Info] Debug mode enabled."; log "Debug mode explicitly enabled by user."; else echo "[Agent Info] Debug mode is already enabled."; fi
+        continue
+    elif [[ "$USER_GOAL_TRIMMED" == "set debug=off" ]]; then
+         if [ "$DEBUG_MODE" -ne 0 ]; then DEBUG_MODE=0; echo "[Agent Info] Debug mode disabled."; log "Debug mode explicitly disabled by user."; else echo "[Agent Info] Debug mode is already disabled."; fi
+        continue
+    fi
+
+    if [ -z "$USER_GOAL_TRIMMED" ]; then
+        continue
+    fi
+
+    # --- Process Goal via AI ---
+    log "User Goal Received: $USER_GOAL_TRIMMED"
+
+    log "Constructing API Payload..."
+    # ** FIX: Restore the full JSON structure for the jq command **
+    json_payload=$(jq -n --arg model "$MODEL" --argjson temp "$TEMPERATURE" --argjson max_tokens "$MAX_TOKENS" --arg system_prompt "$SYSTEM_PROMPT" --arg user_prompt "$USER_GOAL_TRIMMED" \
+    '{
+        "model": $model,
+        "messages": [
+            {"role": "system", "content": $system_prompt},
+            {"role": "user", "content": $user_prompt}
+        ],
+        "temperature": $temp,
+        "max_tokens": $max_tokens,
+        "n": 1,
+        "stop": null
+    }')
+
+    # ** ADDED: Check if jq command failed **
+    jq_exit_status=$?
+    if [ $jq_exit_status -ne 0 ]; then
+        log "FATAL: jq command failed during payload construction (Exit Status: $jq_exit_status)."
+        # Always show this error to the user
+        echo "[Agent Error] Internal error: Failed to construct API request payload (jq error)." >&2
+        # Skip rest of loop if payload construction failed
+        continue
+    fi
+
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+        log "API Payload (summary): $(echo "$json_payload" | jq -c '.messages[1].content = "<user_goal>"')"
+    fi
+
+    log "Calling OpenAI API..."
+    api_response=$(curl -s -X POST "$OPENAI_API_ENDPOINT" \
+         -H "Content-Type: application/json" \
+         -H "Authorization: Bearer $OPENAI_API_KEY" \
+         -d "$json_payload")
+
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+        log "Raw API Response (start): $(echo "$api_response" | head -c 200)..."
+    fi
+
+    log "Extracting command from API response..."
+    # Check for explicit API error messages first
+    error_message=$(echo "$api_response" | jq -r '.error.message // empty')
+    if [ -n "$error_message" ]; then
+        log "API Error: $error_message"
+        echo "[Agent Error] OpenAI API returned an error: $error_message" >&2
+        continue
+    fi
+
+    # Extract the actual command content
+    generated_command=$(echo "$api_response" | jq -r '.choices[0].message.content // empty')
+    # Trim whitespace
+    generated_command=$(echo "$generated_command" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
+    if [ -z "$generated_command" ]; then
+        log "Error: Could not extract command (extracted empty string)."
+        echo "[Agent Error] Failed to get a valid command from the AI." >&2
+        if [ "$DEBUG_MODE" -eq 1 ]; then log "Full API Response for Debugging: $api_response"; fi
+        continue
+    fi
+
+    # Check AI refusal
+    if [[ "$generated_command" == 'echo "Error: Goal is too complex or requires tools not typically available."' ]]; then
+        log "AI indicated goal is too complex..."
+        echo "[Agent Info] Request cannot be fulfilled by command line:"
+        ai_error_output=$(eval "$generated_command")
+        echo "$ai_error_output"
+        echo "[AI Refusal Output] $ai_error_output" >> "$LOG_FILE"
+        continue
+    fi
+
+    log "Extracted Command: [$generated_command]"
+
+    # --- Execute Command (Conditional Output/Logging) ---
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+        # VERBOSE MODE
+        echo; echo "--- Agent Executing ---" >&2
+        log "!!! CAUTION: Executing AI-generated command: [$generated_command] !!!"
+        echo "$generated_command" >&2; echo "-----------------------" >&2
+        ( eval "$generated_command" ) 2>&1 | tee -a "$LOG_FILE"
+        execution_status=${PIPESTATUS[0]}
+        log "Command execution finished with exit status: $execution_status"
+        echo "--- Agent Finished (Status: $execution_status) ---" >&2; echo
+    else
+        # QUIET MODE
+        command_output=$( (eval "$generated_command") 2>&1 )
+        execution_status=${PIPESTATUS[0]}
+        if [ -n "$command_output" ]; then echo "$command_output"; fi
+        echo "[Command Executed] [$generated_command]" >> "$LOG_FILE"
+        echo "[Command Exit Status] $execution_status" >> "$LOG_FILE"
+        if [ -n "$command_output" ]; then echo "[Command Output Start]" >> "$LOG_FILE"; echo "$command_output" >> "$LOG_FILE"; echo "[Command Output End]" >> "$LOG_FILE"; else echo "[Command Output] <empty>" >> "$LOG_FILE"; fi
+        if [ $execution_status -ne 0 ]; then echo "[Agent Info: Command failed with status $execution_status]" >&2; fi
+        if [ -n "$command_output" ] || [ $execution_status -ne 0 ]; then echo; fi
+    fi
+
+done # End of while loop
+
+# --- Cleanup ---
+log "Agent shell terminated."
+echo "Exiting Agent Shell."
+exit 0
